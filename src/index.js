@@ -14,29 +14,32 @@ const binance = new Binance().options({
 const CONFIG = {
     UPDATE_INTERVAL: 1000, // Cập nhật mỗi 1 giây
     PRICE_CHANGE_THRESHOLD: 0.1, // Chỉ hiển thị khi giá thay đổi > 0.1%
-    VOLUME_THRESHOLD: 1.0 // Chỉ hiển thị khi volume > 1.0
+    VOLUME_THRESHOLD: 1.0, // Chỉ hiển thị khi volume > 1.0
+    SYMBOLS: ['BTCUSDT', 'ETHUSDT', 'BNBUSDT'], // Thêm các symbol cần theo dõi
+    ORDERBOOK_DEPTH: 10 // Độ sâu của orderbook
 };
 
-// Biến lưu trữ trạng thái
-let lastUpdate = {
-    time: 0,
-    bidPrice: 0,
-    askPrice: 0,
-    bidVolume: 0,
-    askVolume: 0,
-    spread: 0
-};
+// Biến lưu trữ trạng thái cho từng symbol
+let lastUpdates = {};
+let orderbooks = {};
 
-// Biến theo dõi thời gian
-let timingMetrics = {
-    lastPushTime: 0,
-    lastGetTime: 0,
-    pushLatency: [],
-    getLatency: [],
-    totalPushCount: 0,
-    totalGetCount: 0,
-    startTime: Date.now()
-};
+CONFIG.SYMBOLS.forEach(symbol => {
+    lastUpdates[symbol] = {
+        time: 0,
+        bidPrice: 0,
+        askPrice: 0,
+        bidVolume: 0,
+        askVolume: 0,
+        spread: 0,
+        lastGetTime: 0,
+        getLatency: []
+    };
+    orderbooks[symbol] = {
+        bids: [],
+        asks: [],
+        lastUpdateId: 0
+    };
+});
 
 // Function to format time
 function formatTime(timestamp) {
@@ -49,34 +52,58 @@ function formatTime(timestamp) {
     });
 }
 
-// Function to log timing statistics
-function logTimingStats() {
-    const now = Date.now();
-    const uptime = (now - timingMetrics.startTime) / 1000;
-    
-    console.log('\n=== Timing Statistics ===');
-    console.log(`Uptime: ${uptime.toFixed(2)} seconds`);
-    console.log(`Total Push Count: ${timingMetrics.totalPushCount}`);
-    console.log(`Total Get Count: ${timingMetrics.totalGetCount}`);
-    
-    if (timingMetrics.pushLatency.length > 0) {
-        const avgPushLatency = timingMetrics.pushLatency.reduce((a, b) => a + b, 0) / timingMetrics.pushLatency.length;
-        const maxPushLatency = Math.max(...timingMetrics.pushLatency);
-        const minPushLatency = Math.min(...timingMetrics.pushLatency);
-        console.log('\nPush Statistics:');
-        console.log(`Average Push Latency: ${avgPushLatency.toFixed(2)}ms`);
-        console.log(`Max Push Latency: ${maxPushLatency.toFixed(2)}ms`);
-        console.log(`Min Push Latency: ${minPushLatency.toFixed(2)}ms`);
+// Function to get orderbook data
+async function getOrderbook(symbol, limit = CONFIG.ORDERBOOK_DEPTH) {
+    try {
+        const startTime = Date.now();
+        const orderbook = await binance.depth(symbol, { limit });
+        const endTime = Date.now();
+        console.log(`\n=== Orderbook for ${symbol} ===`);
+        console.log(`Request Time: ${formatTime(startTime)}`);
+        console.log(`Response Time: ${formatTime(endTime)}`);
+        console.log(`Latency: ${endTime - startTime}ms`);
+        
+        // Format and display bids
+        console.log('\nBids:');
+        orderbook.bids.slice(0, limit).forEach((bid, index) => {
+            console.log(`${index + 1}. Price: ${parseFloat(bid[0]).toFixed(2)} | Quantity: ${parseFloat(bid[1]).toFixed(4)}`);
+        });
+        
+        // Format and display asks
+        console.log('\nAsks:');
+        orderbook.asks.slice(0, limit).forEach((ask, index) => {
+            console.log(`${index + 1}. Price: ${parseFloat(ask[0]).toFixed(2)} | Quantity: ${parseFloat(ask[1]).toFixed(4)}`);
+        });
+        
+        // Calculate and display spread
+        const bestBid = parseFloat(orderbook.bids[0][0]);
+        const bestAsk = parseFloat(orderbook.asks[0][0]);
+        const spread = ((bestAsk - bestBid) / bestBid * 100).toFixed(4);
+        console.log(`\nSpread: ${spread}%`);
+        
+        return orderbook;
+    } catch (error) {
+        console.error(`Error getting orderbook for ${symbol}:`, error.message);
+        return null;
     }
+}
+
+// Function to log timing statistics for a symbol
+function logSymbolStats(symbol) {
+    const stats = lastUpdates[symbol];
+    const now = Date.now();
     
-    if (timingMetrics.getLatency.length > 0) {
-        const avgGetLatency = timingMetrics.getLatency.reduce((a, b) => a + b, 0) / timingMetrics.getLatency.length;
-        const maxGetLatency = Math.max(...timingMetrics.getLatency);
-        const minGetLatency = Math.min(...timingMetrics.getLatency);
-        console.log('\nGet Statistics:');
-        console.log(`Average Get Latency: ${avgGetLatency.toFixed(2)}ms`);
-        console.log(`Max Get Latency: ${maxGetLatency.toFixed(2)}ms`);
-        console.log(`Min Get Latency: ${minGetLatency.toFixed(2)}ms`);
+    console.log(`\n=== ${symbol} Statistics ===`);
+    console.log(`Last Update Time: ${formatTime(stats.lastGetTime)}`);
+    console.log(`Time since last update: ${((now - stats.lastGetTime)/1000).toFixed(2)}s`);
+    
+    if (stats.getLatency.length > 0) {
+        const avgLatency = stats.getLatency.reduce((a, b) => a + b, 0) / stats.getLatency.length;
+        const maxLatency = Math.max(...stats.getLatency);
+        const minLatency = Math.min(...stats.getLatency);
+        console.log(`Average Latency: ${avgLatency.toFixed(2)}ms`);
+        console.log(`Max Latency: ${maxLatency.toFixed(2)}ms`);
+        console.log(`Min Latency: ${minLatency.toFixed(2)}ms`);
     }
     console.log('========================\n');
 }
@@ -88,18 +115,46 @@ function handleDepthUpdate(depth) {
         
         // Cập nhật thời gian get
         const currentTime = Date.now();
-        timingMetrics.lastGetTime = currentTime;
-        timingMetrics.getLatency.push(currentTime - eventTime);
-        timingMetrics.totalGetCount++;
+        const latency = currentTime - eventTime;
+        
+        if (!lastUpdates[symbol]) {
+            lastUpdates[symbol] = {
+                time: 0,
+                bidPrice: 0,
+                askPrice: 0,
+                bidVolume: 0,
+                askVolume: 0,
+                spread: 0,
+                lastGetTime: 0,
+                getLatency: []
+            };
+        }
+        
+        // Cập nhật orderbook
+        if (!orderbooks[symbol]) {
+            orderbooks[symbol] = {
+                bids: [],
+                asks: [],
+                lastUpdateId: 0
+            };
+        }
+        
+        // Cập nhật orderbook với dữ liệu mới
+        orderbooks[symbol].bids = bids.slice(0, CONFIG.ORDERBOOK_DEPTH);
+        orderbooks[symbol].asks = asks.slice(0, CONFIG.ORDERBOOK_DEPTH);
+        orderbooks[symbol].lastUpdateId = updateId;
+        
+        lastUpdates[symbol].lastGetTime = currentTime;
+        lastUpdates[symbol].getLatency.push(latency);
         
         // Giới hạn số lượng metrics lưu trữ
-        if (timingMetrics.getLatency.length > 100) {
-            timingMetrics.getLatency.shift();
+        if (lastUpdates[symbol].getLatency.length > 100) {
+            lastUpdates[symbol].getLatency.shift();
         }
         
         // Kiểm tra dữ liệu đầu vào
         if (!bids?.[0] || !asks?.[0]) {
-            console.warn('Invalid orderbook data received');
+            console.warn(`Invalid orderbook data received for ${symbol}`);
             return;
         }
 
@@ -110,15 +165,15 @@ function handleDepthUpdate(depth) {
 
         // Kiểm tra giá trị hợp lệ
         if (isNaN(bidPrice) || isNaN(askPrice) || isNaN(bidVolume) || isNaN(askVolume)) {
-            console.warn('Invalid price or volume data received');
+            console.warn(`Invalid price or volume data received for ${symbol}`);
             return;
         }
 
-        // Tính toán phần trăm thay đổi (tránh chia cho 0)
-        const bidPriceChange = lastUpdate.bidPrice === 0 ? 100 : 
-            Math.abs((bidPrice - lastUpdate.bidPrice) / lastUpdate.bidPrice * 100);
-        const askPriceChange = lastUpdate.askPrice === 0 ? 100 :
-            Math.abs((askPrice - lastUpdate.askPrice) / lastUpdate.askPrice * 100);
+        // Tính toán phần trăm thay đổi
+        const bidPriceChange = lastUpdates[symbol].bidPrice === 0 ? 100 : 
+            Math.abs((bidPrice - lastUpdates[symbol].bidPrice) / lastUpdates[symbol].bidPrice * 100);
+        const askPriceChange = lastUpdates[symbol].askPrice === 0 ? 100 :
+            Math.abs((askPrice - lastUpdates[symbol].askPrice) / lastUpdates[symbol].askPrice * 100);
 
         // Chỉ hiển thị khi có thay đổi đáng kể
         if (bidPriceChange > CONFIG.PRICE_CHANGE_THRESHOLD || 
@@ -129,22 +184,25 @@ function handleDepthUpdate(depth) {
             console.log(`\n=== Orderbook Update for ${symbol} ===`);
             console.log(`Event Time: ${formatTime(eventTime)}`);
             console.log(`Receive Time: ${formatTime(currentTime)}`);
+            console.log(`Latency: ${latency}ms`);
             console.log(`Bid: ${bidPrice.toFixed(2)} (${bidVolume.toFixed(4)} units)`);
             console.log(`Ask: ${askPrice.toFixed(2)} (${askVolume.toFixed(4)} units)`);
             console.log(`Spread: ${((askPrice - bidPrice) / bidPrice * 100).toFixed(4)}%`);
             
-            // Hiển thị thông tin thời gian
-            const avgGetLatency = timingMetrics.getLatency.reduce((a, b) => a + b, 0) / timingMetrics.getLatency.length;
-            console.log(`Get Latency: ${avgGetLatency.toFixed(2)}ms`);
-            
-            // Log timing stats every 100 updates
-            if (timingMetrics.totalGetCount % 100 === 0) {
-                logTimingStats();
-            }
+            // Hiển thị orderbook hiện tại
+            console.log('\nCurrent Orderbook:');
+            console.log('Bids:');
+            orderbooks[symbol].bids.forEach((bid, index) => {
+                console.log(`${index + 1}. Price: ${parseFloat(bid[0]).toFixed(2)} | Quantity: ${parseFloat(bid[1]).toFixed(4)}`);
+            });
+            console.log('\nAsks:');
+            orderbooks[symbol].asks.forEach((ask, index) => {
+                console.log(`${index + 1}. Price: ${parseFloat(ask[0]).toFixed(2)} | Quantity: ${parseFloat(ask[1]).toFixed(4)}`);
+            });
             
             // Cập nhật trạng thái
-            lastUpdate = {
-                ...lastUpdate,
+            lastUpdates[symbol] = {
+                ...lastUpdates[symbol],
                 time: currentTime,
                 bidPrice,
                 askPrice,
@@ -157,85 +215,14 @@ function handleDepthUpdate(depth) {
     }
 }
 
-// Function to handle book ticker updates
-function handleBookTicker(ticker) {
-    try {
-        const { u: updateId, s: symbol, b: bidPrice, B: bidQty, a: askPrice, A: askQty } = ticker;
-        
-        // Cập nhật thời gian push
-        const currentTime = Date.now();
-        timingMetrics.lastPushTime = currentTime;
-        timingMetrics.pushLatency.push(currentTime - Date.now());
-        timingMetrics.totalPushCount++;
-        
-        // Giới hạn số lượng metrics lưu trữ
-        if (timingMetrics.pushLatency.length > 100) {
-            timingMetrics.pushLatency.shift();
-        }
-        
-        // Kiểm tra dữ liệu đầu vào
-        if (!bidPrice || !askPrice) {
-            console.warn('Invalid ticker data received');
-            return;
-        }
-
-        const bidPriceNum = parseFloat(bidPrice);
-        const askPriceNum = parseFloat(askPrice);
-        const bidQtyNum = parseFloat(bidQty);
-        const askQtyNum = parseFloat(askQty);
-
-        // Kiểm tra giá trị hợp lệ
-        if (isNaN(bidPriceNum) || isNaN(askPriceNum) || isNaN(bidQtyNum) || isNaN(askQtyNum)) {
-            console.warn('Invalid price or quantity data received');
-            return;
-        }
-
-        const spread = (askPriceNum - bidPriceNum) / bidPriceNum * 100;
-        
-        // Chỉ hiển thị khi spread thay đổi đáng kể
-        if (Math.abs(spread - lastUpdate.spread) > CONFIG.PRICE_CHANGE_THRESHOLD) {
-            console.log(`\n=== BookTicker Update for ${symbol} ===`);
-            console.log(`Push Time: ${formatTime(currentTime)}`);
-            console.log(`Bid: ${bidPriceNum.toFixed(2)} (${bidQtyNum.toFixed(4)} units)`);
-            console.log(`Ask: ${askPriceNum.toFixed(2)} (${askQtyNum.toFixed(4)} units)`);
-            console.log(`Spread: ${spread.toFixed(4)}%`);
-            
-            // Hiển thị thông tin thời gian
-            const avgPushLatency = timingMetrics.pushLatency.reduce((a, b) => a + b, 0) / timingMetrics.pushLatency.length;
-            console.log(`Push Latency: ${avgPushLatency.toFixed(2)}ms`);
-            
-            // Log timing stats every 100 updates
-            if (timingMetrics.totalPushCount % 100 === 0) {
-                logTimingStats();
-            }
-            
-            lastUpdate = {
-                ...lastUpdate,
-                time: currentTime,
-                spread
-            };
-        }
-    } catch (error) {
-        console.error('Error in handleBookTicker:', error.message);
-    }
-}
-
 // Connect to WebSocket for orderbook updates
 console.log('Connecting to Binance WebSocket for orderbook updates...');
-binance.websockets.depth(['BTCUSDT'], (data) => {
-    console.log('Orderbook WebSocket connected successfully');
+binance.websockets.depth(CONFIG.SYMBOLS, (data) => {
     handleDepthUpdate(data);
 });
 
-// Connect to WebSocket for book ticker updates
-console.log('Connecting to Binance WebSocket for book ticker updates...');
-binance.websockets.bookTickers((data) => {
-    console.log('BookTicker WebSocket connected successfully');
-    handleBookTicker(data);
-});
-
 // Add WebSocket error handling
-binance.websockets.subscribe(['BTCUSDT'], (data) => {
+binance.websockets.subscribe(CONFIG.SYMBOLS, (data) => {
     if (data.e === 'error') {
         console.error('WebSocket Error:', data);
     }
@@ -250,138 +237,21 @@ process.on('unhandledRejection', (error) => {
     console.error('Unhandled Rejection:', error);
 });
 
-// Add periodic connection status check
-setInterval(() => {
-    const now = Date.now();
+// Add periodic connection status check and orderbook update
+setInterval(async () => {
     console.log('\n=== Connection Status ===');
-    console.log(`Last Get Update: ${formatTime(timingMetrics.lastGetTime)}`);
-    console.log(`Last Push Update: ${formatTime(timingMetrics.lastPushTime)}`);
-    console.log(`Time since last Get: ${((now - timingMetrics.lastGetTime)/1000).toFixed(2)}s`);
-    console.log(`Time since last Push: ${((now - timingMetrics.lastPushTime)/1000).toFixed(2)}s`);
-    console.log('========================\n');
+    for (const symbol of CONFIG.SYMBOLS) {
+        logSymbolStats(symbol);
+        // Get fresh orderbook data every 30 seconds
+        await getOrderbook(symbol);
+    }
 }, 30000); // Check every 30 seconds
 
-// Hàm đo thời gian thực hiện
-async function measureExecutionTime(fn, ...args) {
-    const startTime = Date.now();
-    try {
-        const result = await fn(...args);
-        const endTime = Date.now();
-        const executionTime = endTime - startTime;
-        console.log(`Execution time for ${fn.name}: ${executionTime}ms`);
-        return { result, executionTime };
-    } catch (error) {
-        const endTime = Date.now();
-        const executionTime = endTime - startTime;
-        console.error(`Error in ${fn.name} after ${executionTime}ms:`, error);
-        throw error;
-    }
-}
-
-// Ví dụ về các lệnh GET với đo thời gian
-async function getAccountInfo() {
-    try {
-        const startTime = Date.now();
-        const accountInfo = await binance.account();
-        const endTime = Date.now();
-        console.log(`GET Account Info - Time: ${endTime - startTime}ms`);
-        return accountInfo;
-    } catch (error) {
-        console.error('Error getting account info:', error);
-    }
-}
-
-async function getOrderBook(symbol = 'BTCUSDT', limit = 5) {
-    try {
-        const startTime = Date.now();
-        const orderBook = await binance.depth(symbol, { limit });
-        const endTime = Date.now();
-        console.log(`GET Order Book - Time: ${endTime - startTime}ms`);
-        return orderBook;
-    } catch (error) {
-        console.error('Error getting order book:', error);
-    }
-}
-
-async function get24hrTicker(symbol = 'BTCUSDT') {
-    try {
-        const startTime = Date.now();
-        const ticker = await binance.prevDay(symbol);
-        const endTime = Date.now();
-        console.log(`GET 24hr Ticker - Time: ${endTime - startTime}ms`);
-        return ticker;
-    } catch (error) {
-        console.error('Error getting 24hr ticker:', error);
-    }
-}
-
-// Ví dụ về các lệnh POST với đo thời gian
-async function createOrder(symbol = 'BTCUSDT', side = 'BUY', quantity = 0.001) {
-    try {
-        const startTime = Date.now();
-        const order = await binance.marketBuy(symbol, quantity);
-        const endTime = Date.now();
-        console.log(`POST Market Order - Time: ${endTime - startTime}ms`);
-        return order;
-    } catch (error) {
-        console.error('Error creating order:', error);
-    }
-}
-
-async function createLimitOrder(symbol = 'BTCUSDT', side = 'BUY', quantity = 0.001, price = 50000) {
-    try {
-        const startTime = Date.now();
-        const order = await binance.buy(symbol, quantity, price);
-        const endTime = Date.now();
-        console.log(`POST Limit Order - Time: ${endTime - startTime}ms`);
-        return order;
-    } catch (error) {
-        console.error('Error creating limit order:', error);
-    }
-}
-
-async function cancelOrder(symbol = 'BTCUSDT', orderId) {
-    try {
-        const startTime = Date.now();
-        const result = await binance.cancel(symbol, orderId);
-        const endTime = Date.now();
-        console.log(`POST Cancel Order - Time: ${endTime - startTime}ms`);
-        return result;
-    } catch (error) {
-        console.error('Error canceling order:', error);
-    }
-}
-
-// Hàm test các lệnh với thống kê thời gian
-async function testApiCommandsWithTiming() {
-    console.log('\n=== Testing GET Commands with Timing ===');
-    const getResults = {
-        accountInfo: await measureExecutionTime(getAccountInfo),
-        orderBook: await measureExecutionTime(getOrderBook),
-        ticker24h: await measureExecutionTime(get24hrTicker)
-    };
-
-    console.log('\n=== GET Commands Timing Summary ===');
-    Object.entries(getResults).forEach(([name, { executionTime }]) => {
-        console.log(`${name}: ${executionTime}ms`);
-    });
-
-    console.log('\n=== Testing POST Commands with Timing ===');
-    // Lưu ý: Các lệnh POST này sẽ thực sự tạo lệnh giao dịch
-    // Hãy cẩn thận khi sử dụng trong môi trường thực tế
-    /*
-    const postResults = {
-        marketOrder: await measureExecutionTime(createOrder),
-        limitOrder: await measureExecutionTime(createLimitOrder),
-        cancelOrder: await measureExecutionTime(cancelOrder)
-    };
-
-    console.log('\n=== POST Commands Timing Summary ===');
-    Object.entries(postResults).forEach(([name, { executionTime }]) => {
-        console.log(`${name}: ${executionTime}ms`);
-    });
-    */
-}
+// Export functions for external use
+module.exports = {
+    getOrderbook,
+    CONFIG
+};
 
 // Gọi hàm test
 // testApiCommandsWithTiming(); 
